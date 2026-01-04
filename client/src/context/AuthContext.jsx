@@ -1,19 +1,20 @@
 import { createContext, useState, useEffect, useContext } from 'react';
 import { Amplify } from 'aws-amplify';
-import { signIn, signOut, getCurrentUser, fetchAuthSession } from 'aws-amplify/auth';
+// Added confirmSignIn to imports to handle Force Change Password state
+import { signIn, signOut, getCurrentUser, fetchAuthSession, confirmSignIn } from 'aws-amplify/auth';
 import { cognitoConfig } from '../aws-config';
 
-// 1. Initialize Amplify with your configuration
+// Initialize Amplify
 Amplify.configure(cognitoConfig);
 
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null);       // The current logged-in user object
-  const [userRole, setUserRole] = useState(null); // The user's role: 'CLIENT' / 'CPA' / 'ADMIN'
-  const [loading, setLoading] = useState(true);   // Loading state for initial auth check
+  const [user, setUser] = useState(null);
+  const [userRole, setUserRole] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  // Check if the user is already signed in (runs on page load/refresh)
+  // Check auth status on mount
   useEffect(() => {
     checkUser();
   }, []);
@@ -22,26 +23,29 @@ export const AuthProvider = ({ children }) => {
     try {
       const currentUser = await getCurrentUser();
       const session = await fetchAuthSession();
-
-       // DEBUG: Log the full session object
-    console.log('Session Object:', session);
-    console.log('Access Token Payload:', session.tokens?.accessToken?.payload);
-
-
-      // Extract groups
-    const groups = session.tokens?.accessToken?.payload['cognito:groups'] || [];
-    console.log('Extracted Groups:', groups); // <-- THIS WILL SHOW WHAT GROUPS ARE FOUND
       
-      // Determine role based on group membership
-      const role = groups.includes('ADMIN') ? 'ADMIN'
-                 : groups.includes('CPA') ? 'CPA'
-                 : 'CLIENT'; // Default fallback if no group found
-      console.log('Detected Role:', role); // <-- THIS WILL SHOW THE FINAL ROLE
+      console.log("🔥 FULL SESSION:", session);
+
+      // Extract groups from both Access Token and ID Token to ensure we don't miss anything
+      const accessTokenGroups = session.tokens?.accessToken?.payload['cognito:groups'] || [];
+      const idTokenGroups = session.tokens?.idToken?.payload['cognito:groups'] || [];
+      
+      // Merge groups and remove duplicates
+      const groups = [...new Set([...accessTokenGroups, ...idTokenGroups])];
+      
+      console.log("✅ Detected Groups:", groups);
+
+      // Determine user role based on group priority
+      const role = groups.includes('ADMIN') ? 'ADMIN' 
+                 : groups.includes('CPA') ? 'CPA' 
+                 : 'CLIENT';
+
+      console.log("👑 Final Role Assigned:", role);
 
       setUser(currentUser);
       setUserRole(role);
     } catch (error) {
-      console.log('Not signed in');
+      console.log('Not signed in (User needs to login)');
       setUser(null);
       setUserRole(null);
     } finally {
@@ -49,21 +53,38 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  // Login function
+  // --- Enhanced Login Function ---
   const login = async (email, password) => {
     try {
-      const { isSignedIn, nextStep } = await signIn({ username: email, password });
-      if (isSignedIn) {
-        await checkUser(); // Update global state after successful login
+      const response = await signIn({ username: email, password });
+      console.log("Login Step 1 Response:", response);
+
+      // 1. Standard login successful
+      if (response.isSignedIn) {
+        await checkUser();
         return { success: true };
+      } 
+      
+      // 2. Handle "Force Change Password" state automatically
+      // This happens when a user is created administratively
+      else if (response.nextStep.signInStep === 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED') {
+        console.log("⚠️ Force Change Password Detected. Auto-confirming...");
+        
+        // Confirm using the existing password as the "new" password
+        const confirmedResponse = await confirmSignIn({ challengeResponse: password });
+        console.log("Login Step 2 (Confirm) Response:", confirmedResponse);
+
+        if (confirmedResponse.isSignedIn) {
+          await checkUser();
+          return { success: true };
+        }
       }
     } catch (error) {
       console.error('Login error:', error);
-      throw error; // Re-throw error so the Login Page can handle/display it
+      throw error;
     }
   };
 
-  // Logout function
   const logout = async () => {
     try {
       await signOut();
@@ -80,4 +101,4 @@ export const AuthProvider = ({ children }) => {
     </AuthContext.Provider>
   );
 };
-export const useAuth = () => useContext(AuthContext);// Custom hook to use the AuthContext easily
+export const useAuth = () => useContext(AuthContext);
